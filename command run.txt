@@ -1,0 +1,1 @@
+"C:\Users\mattw\AppData\Local\Programs\Python\Python313\Scripts\pyinstaller.exe" HockeyScheduler.spec
