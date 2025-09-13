@@ -8,7 +8,7 @@ import datetime
 
 
 # =============================================================================
-# SECTION 1: CORE DATA STRUCTURES (Fixed)
+# SECTION 1: CORE DATA STRUCTURES
 # =============================================================================
 
 class ScheduleConflictValidator:
@@ -132,24 +132,17 @@ class AvailableBlock:
         self.bookings.append(booking)
         
         return booking_start_dt.time(), booking_end_dt.time()
-    
-    def get_next_available_time(self) -> datetime.time:
-        """Get the next available start time in this block"""
-        used_minutes = sum(booking['duration'] for booking in self.bookings)
-        start_dt = datetime.datetime.combine(datetime.date.min, self.start_time)
-        next_available_dt = start_dt + datetime.timedelta(minutes=used_minutes)
-        return next_available_dt.time()
 
 
 # =============================================================================
-# SECTION 2: UTILITY FUNCTIONS (Enhanced)
+# SECTION 2: UTILITY FUNCTIONS
 # =============================================================================
 
 def normalize_team_info(raw: dict) -> dict:
     """Convert legacy JSON structures into new scheduler format."""
     out = dict(raw or {})
 
-    # Preferred days normalization - FIXED to handle strict preferences correctly
+    # Preferred days normalization
     pref = out.get("preferred_days_and_times", {})
     norm_pref = {}
     strict_flag = False
@@ -169,7 +162,7 @@ def normalize_team_info(raw: dict) -> dict:
                     t = str(val[0])
                     try:
                         hh, mm = [int(x) for x in t.split(":")]
-                        end_hh, end_mm = hh + 1, mm  # Default 1-hour duration
+                        end_hh, end_mm = hh + 1, mm
                         if end_hh >= 24:
                             end_hh = 23
                             end_mm = 59
@@ -184,7 +177,7 @@ def normalize_team_info(raw: dict) -> dict:
                 norm_pref[day] = ""
     
     out["preferred_days_and_times"] = norm_pref
-    out["strict_preferred"] = strict_flag  # Set based on actual strict preferences
+    out["strict_preferred"] = strict_flag
 
     # Blackouts normalization
     bl = []
@@ -200,7 +193,7 @@ def normalize_team_info(raw: dict) -> dict:
             bl.extend(b2)
     out["blackout_dates"] = bl
 
-    # Shared ice normalization - FIXED to handle mandatory shared ice
+    # Shared ice normalization
     s = out.get("shared_ice", None)
     if isinstance(s, dict):
         out["allow_shared_ice"] = bool(s.get("enabled", True))
@@ -209,10 +202,8 @@ def normalize_team_info(raw: dict) -> dict:
     else:
         out.setdefault("allow_shared_ice", True)
     
-    # Handle mandatory shared ice - NEW FIELD
     out.setdefault("mandatory_shared_ice", False)
     
-    # If mandatory shared ice is True, ensure allow_shared_ice is also True
     if out.get("mandatory_shared_ice", False):
         out["allow_shared_ice"] = True
 
@@ -228,7 +219,7 @@ def normalize_team_info(raw: dict) -> dict:
 
     # Late cutoff
     if out.get("late_ice_cutoff_enabled") and out.get("late_ice_cutoff_time"):
-        pass  # already in new format
+        pass
     else:
         legacy = out.get("late_ice_cutoff")
         if legacy:
@@ -265,17 +256,66 @@ def get_week_number(date: datetime.date, start_date: datetime.date) -> int:
     return (days_diff // 7) + 1
 
 
+def get_sessions_on_date_count(team_data: dict, check_date: datetime.date) -> int:
+    """Get count of sessions a team has on a specific date."""
+    return len([d for d in team_data["scheduled_dates"] if d == check_date])
+
+
+def is_consecutive_with_existing_session(team_name: str, team_data: dict, new_block: AvailableBlock, 
+                                       schedule: List[dict]) -> bool:
+    """Check if a new booking would be consecutive with existing session on same date."""
+    existing_sessions = [
+        event for event in schedule 
+        if ((event.get("team") == team_name and event.get("date") == new_block.date.isoformat()) or
+            (event.get("type") == "shared practice" and event.get("opponent") == team_name and 
+             event.get("date") == new_block.date.isoformat()))
+    ]
+    
+    if not existing_sessions:
+        return True
+    
+    for session in existing_sessions:
+        try:
+            existing_start_str, existing_end_str = session["time_slot"].split("-")
+            existing_start = datetime.datetime.strptime(existing_start_str, "%H:%M").time()
+            existing_end = datetime.datetime.strptime(existing_end_str, "%H:%M").time()
+            
+            # Check if consecutive
+            if (new_block.start_time == existing_end or new_block.end_time == existing_start):
+                return True
+                
+        except Exception as e:
+            print(f"    DEBUG: Error parsing time slot {session.get('time_slot', '')}: {e}")
+            continue
+    
+    return False
+
+
+def block_would_exceed_daily_limit(team_name: str, team_data: dict, block: AvailableBlock, 
+                                 schedule: List[dict]) -> bool:
+    """Check if booking would exceed reasonable daily limits (max 3 sessions per day)."""
+    sessions_on_date = get_sessions_on_date_count(team_data, block.date)
+    
+    # Hard limit: no more than 3 sessions per day even for utilization
+    if sessions_on_date >= 3:
+        return True
+    
+    # If 2+ sessions, must be consecutive
+    if sessions_on_date >= 2:
+        return not is_consecutive_with_existing_session(team_name, team_data, block, schedule)
+    
+    return False
+
+
 # =============================================================================
-# SECTION 3: STRICT PREFERENCE FUNCTIONS (FIXED)
+# SECTION 3: STRICT PREFERENCE FUNCTIONS
 # =============================================================================
 
 def has_strict_preferences(team_info: dict) -> bool:
-    """Check if team has strict time preferences - FIXED logic."""
-    # Check the explicit strict_preferred flag first
+    """Check if team has strict time preferences."""
     if team_info.get("strict_preferred", False):
         return True
     
-    # Check for strict preference flags in preferred_days_and_times
     prefs = team_info.get("preferred_days_and_times", {})
     for key, value in prefs.items():
         if key.endswith("_strict") and value:
@@ -285,7 +325,7 @@ def has_strict_preferences(team_info: dict) -> bool:
 
 
 def _parse_preferred_windows(team_info: dict) -> dict:
-    """Parse preferred days/times into structured windows with strict flags - FIXED."""
+    """Parse preferred days/times into structured windows with strict flags."""
     windows = defaultdict(list)
     prefs = team_info.get("preferred_days_and_times", {})
     
@@ -329,8 +369,7 @@ def find_exact_strict_preference_matches(team_info: dict, available_blocks: List
         
         if block_day in windows:
             for start_pref, end_pref, is_strict_window in windows[block_day]:
-                if is_strict_window:  # ONLY strict preferences
-                    # Check if block times exactly match or contain the preferred time
+                if is_strict_window:
                     if (block.start_time <= start_pref and block.end_time >= end_pref):
                         exact_matches.append(block)
                         break
@@ -350,7 +389,6 @@ def find_preferred_time_matches(team_info: dict, available_blocks: List[Availabl
             for start_pref, end_pref, is_strict_window in windows[block_day]:
                 if strict_only and not is_strict_window:
                     continue
-                # Check if block times exactly match or contain the preferred time
                 if (block.start_time <= start_pref and block.end_time >= end_pref):
                     matches.append(block)
                     break
@@ -358,26 +396,11 @@ def find_preferred_time_matches(team_info: dict, available_blocks: List[Availabl
     return matches
 
 
-def find_mutual_strict_preference_matches(team1_info: dict, team2_info: dict, available_blocks: List[AvailableBlock]) -> List[AvailableBlock]:
-    """Find blocks that match BOTH teams' strict preferences for shared ice."""
-    team1_matches = find_exact_strict_preference_matches(team1_info, available_blocks)
-    team2_matches = find_exact_strict_preference_matches(team2_info, available_blocks)
-    
-    # Find intersection - blocks that work for both teams
-    mutual_matches = []
-    for block in team1_matches:
-        if block in team2_matches:
-            mutual_matches.append(block)
-    
-    return mutual_matches
-
-
 def find_mutual_preference_matches(team1_info: dict, team2_info: dict, available_blocks: List[AvailableBlock], strict_only: bool = False) -> List[AvailableBlock]:
-    """Find blocks that match BOTH teams' preferences (strict or any) for shared ice."""
+    """Find blocks that match BOTH teams' preferences for shared ice."""
     team1_matches = find_preferred_time_matches(team1_info, available_blocks, strict_only)
     team2_matches = find_preferred_time_matches(team2_info, available_blocks, strict_only)
     
-    # Find intersection - blocks that work for both teams
     mutual_matches = []
     for block in team1_matches:
         if block in team2_matches:
@@ -387,35 +410,17 @@ def find_mutual_preference_matches(team1_info: dict, team2_info: dict, available
 
 
 def get_block_preference_score(block: AvailableBlock, team_info: dict) -> int:
-    """Score block based on preferences with strict priority."""
+    """Score block based on preferences - MODIFIED to not penalize early times."""
     windows = _parse_preferred_windows(team_info)
     block_day = block.date.strftime("%A")
     
     if block_day not in windows:
-        return 0
+        return 10  # Small positive score for any available time instead of 0
     
-    best_score = 0
+    best_score = 10  # Base score for available time
     for start_pref, end_pref, is_strict_window in windows[block_day]:
-        # Check for overlap
         if block.start_time < end_pref and block.end_time > start_pref:
             if is_strict_window:
-                # Calculate how much of the block overlaps with strict preference
-                overlap_start = max(block.start_time, start_pref)
-                overlap_end = min(block.end_time, end_pref)
-                
-                block_duration = (datetime.datetime.combine(datetime.date.min, block.end_time) - 
-                                datetime.datetime.combine(datetime.date.min, block.start_time)).total_seconds()
-                overlap_duration = (datetime.datetime.combine(datetime.date.min, overlap_end) - 
-                                  datetime.datetime.combine(datetime.date.min, overlap_start)).total_seconds()
-                
-                if overlap_duration >= block_duration * 0.8:  # 80% overlap for strict match
-                    return 1000  # VERY HIGH SCORE for strict matches
-                elif overlap_duration >= block_duration * 0.5:  # 50% overlap
-                    return 800   # HIGH SCORE for good strict match
-                else:
-                    return 600   # MEDIUM SCORE for partial strict match
-            else:
-                # Non-strict preference gets much lower scores
                 overlap_start = max(block.start_time, start_pref)
                 overlap_end = min(block.end_time, end_pref)
                 
@@ -425,15 +430,30 @@ def get_block_preference_score(block: AvailableBlock, team_info: dict) -> int:
                                   datetime.datetime.combine(datetime.date.min, overlap_start)).total_seconds()
                 
                 if overlap_duration >= block_duration * 0.8:
-                    best_score = max(best_score, 50)  # Good preferred match
+                    return 1000
+                elif overlap_duration >= block_duration * 0.5:
+                    return 800
                 else:
-                    best_score = max(best_score, 30)  # Partial preferred match
+                    return 600
+            else:
+                overlap_start = max(block.start_time, start_pref)
+                overlap_end = min(block.end_time, end_pref)
+                
+                block_duration = (datetime.datetime.combine(datetime.date.min, block.end_time) - 
+                                datetime.datetime.combine(datetime.date.min, block.start_time)).total_seconds()
+                overlap_duration = (datetime.datetime.combine(datetime.date.min, overlap_end) - 
+                                  datetime.datetime.combine(datetime.date.min, overlap_start)).total_seconds()
+                
+                if overlap_duration >= block_duration * 0.8:
+                    best_score = max(best_score, 50)
+                else:
+                    best_score = max(best_score, 30)
     
     return best_score
 
 
 # =============================================================================
-# SECTION 4: TEAM PROPERTY HELPERS (Enhanced)
+# SECTION 4: TEAM PROPERTY HELPERS
 # =============================================================================
 
 def has_mandatory_shared_ice(team_info: dict) -> bool:
@@ -442,62 +462,52 @@ def has_mandatory_shared_ice(team_info: dict) -> bool:
 
 
 def calculate_team_priority(team_info: dict, team_name: str) -> int:
-    """Calculate allocation priority for teams (lower = higher priority) - REBALANCED."""
+    """Calculate allocation priority for teams (lower = higher priority)."""
     priority = 0
     
-    # Age priority (younger teams get slight priority)
     age = _get_age_numeric(team_info.get("age", ""))
     if age:
-        priority += age // 2  # Reduced impact: U18=9, U7=3 (was 18 vs 7)
+        priority += age // 2
     else:
-        priority += 25  # Reduced from 50
+        priority += 25
     
-    # Type priority (smaller difference)
     team_type = team_info.get("type", "house")
     if team_type == "competitive":
         priority += 0
     else:
-        priority += 3  # Reduced from 10
+        priority += 3
     
-    # Tier priority for competitive teams
     if team_type == "competitive":
         tier = _get_team_tier(team_name, team_info)
         tier_values = {"AA": 0, "A": 1, "BB": 2, "B": 3, "C": 4}
         priority += tier_values.get(tier, 5)
     
-    # Mandatory shared ice gets modest priority boost
     if has_mandatory_shared_ice(team_info):
-        priority -= 10  # Reduced from -100
+        priority -= 10
     
-    # Strict preferences get modest priority boost
     if has_strict_preferences(team_info):
-        priority -= 8  # Reduced from -75
+        priority -= 8
     
     return priority
 
 
 def calculate_constraint_complexity(team_info: dict, team_name: str) -> int:
-    """Calculate how constrained a team is for allocation order (higher = more constrained)."""
+    """Calculate how constrained a team is for allocation order."""
     complexity = 0
     
-    # Mandatory shared ice adds significant complexity
     if has_mandatory_shared_ice(team_info):
         complexity += 100
     
-    # Strict preferences add complexity
     if has_strict_preferences(team_info):
         complexity += 50
     
-    # Count number of blackout dates
     blackouts = team_info.get("blackout_dates", [])
     complexity += len(blackouts) * 2
     
-    # Age restrictions (very young teams have fewer sharing options)
     age = _get_age_numeric(team_info.get("age", ""))
     if age and age <= 9:
         complexity += 20
     
-    # Teams that don't allow sharing are more constrained
     if not team_info.get("allow_shared_ice", True):
         complexity += 30
     
@@ -552,40 +562,51 @@ def has_blackout_on_date(team_info: dict, check_date: datetime.date) -> bool:
 
 
 # =============================================================================
-# SECTION 5: AVAILABILITY CHECKING
+# SECTION 5: SAME-DAY SESSION RULES
 # =============================================================================
 
-def is_block_available_for_team(block: AvailableBlock, team_info: Dict, team_data: Dict, 
-                               rules_data: Dict, start_date: datetime.date) -> bool:
-    """Check if a block is available for a specific team."""
-    required_duration = team_info.get("practice_duration", 60)
+def should_allow_same_day_booking(team_name: str, team_data: dict, new_block: AvailableBlock, 
+                                schedule: List[dict], booking_type: str, allow_multiple: bool) -> bool:
+    """Same-day booking rules with utilization priority in Phase 3."""
+    sessions_on_date = get_sessions_on_date_count(team_data, new_block.date)
     
-    # Check 1: Block has enough time
-    if not block.can_fit_duration(required_duration):
+    # Phase 3 (utilization): More relaxed rules
+    if booking_type in ["extended utilization"]:
+        return not block_would_exceed_daily_limit(team_name, team_data, new_block, schedule)
+    
+    # Standard phases: Max 2 sessions per day, must be consecutive
+    if sessions_on_date >= 2:
+        print(f"    HARD LIMIT: {team_name} already has {sessions_on_date} sessions on {new_block.date} - BLOCKING")
         return False
     
-    # Check 2: No blackout on this date
-    if has_blackout_on_date(team_info, block.date):
-        return False
-    
-    # Check 3: Weekly quota check
-    week_num = get_week_number(block.date, start_date)
-    current_weekly_count = team_data["weekly_count"][week_num]
-    
-    team_type = team_info.get("type")
-    team_age = team_info.get("age")
-    max_per_week = (rules_data.get("ice_times_per_week", {})
-                   .get(team_type, {}).get(team_age, 0))
-    
-    if current_weekly_count >= max_per_week:
-        return False
-    
-    # Check 4: Multiple per day restriction
-    allow_multiple = _safe_allow_multiple(team_info)
-    if not allow_multiple and block.date in team_data.get("scheduled_dates", set()):
-        return False
+    if sessions_on_date == 1:
+        if not is_consecutive_with_existing_session(team_name, team_data, new_block, schedule):
+            print(f"    CONSECUTIVE RULE: {team_name} 2nd session on {new_block.date} would not be consecutive - BLOCKING")
+            return False
+        
+        if (not allow_multiple and 
+            booking_type not in ["shared practice", "minimum guarantee"] and 
+            team_data.get("needed", 0) < 2):
+            print(f"    TEAM POLICY: {team_name} doesn't allow multiple per day - BLOCKING")
+            return False
     
     return True
+
+
+# =============================================================================
+# SECTION 6: ENHANCED SHARED ICE FUNCTIONS
+# =============================================================================
+
+def has_mutual_preferences(team1_info: dict, team2_info: dict) -> bool:
+    """Check if two teams have overlapping preferred days/times."""
+    windows1 = _parse_preferred_windows(team1_info)
+    windows2 = _parse_preferred_windows(team2_info)
+    
+    for day in windows1:
+        if day in windows2:
+            return True
+    
+    return False
 
 
 def can_teams_share_ice(team1_info: dict, team2_info: dict, team1_name: str = "", 
@@ -599,34 +620,90 @@ def can_teams_share_ice(team1_info: dict, team2_info: dict, team1_name: str = ""
     
     age_diff = abs(age1 - age2)
     
-    # Check if both teams allow sharing
     allow1 = team1_info.get("allow_shared_ice", True)
     allow2 = team2_info.get("allow_shared_ice", True)
     
     if not allow1 or not allow2:
         return False
     
-    # Age restrictions (max 3 years difference)
     if age_diff > 3:
         return False
     
     return True
 
 
-def is_block_available_for_team_capacity_phase(block: AvailableBlock, team_info: Dict, team_data: Dict, 
-                                             rules_data: Dict, start_date: datetime.date) -> bool:
-    """Check if a block is available for a specific team during capacity maximization phase (relaxed same-day limits)."""
+def try_shared_ice_for_any_team(team_name: str, team_data: dict, teams_needing_slots: Dict,
+                               available_blocks: List[AvailableBlock], start_date: datetime.date,
+                               schedule: List[Dict], rules_data: Dict, 
+                               validator: ScheduleConflictValidator, booking_type: str = "shared") -> bool:
+    """Try shared ice for ANY team that allows it."""
+    team_info = team_data["info"]
+    
+    if not team_info.get("allow_shared_ice", True):
+        return False
+    
+    # Find compatible partners, prioritized by need
+    compatible_partners = []
+    for other_name, other_data in teams_needing_slots.items():
+        if (other_name != team_name and 
+            other_data["needed"] > 0 and
+            can_teams_share_ice(team_info, other_data["info"], team_name, other_name)):
+            
+            partner_priority = other_data["needed"] * 100
+            if has_mutual_preferences(team_info, other_data["info"]):
+                partner_priority += 50
+            if other_data["info"].get("allow_shared_ice", True):
+                partner_priority += 25
+                
+            compatible_partners.append((partner_priority, other_name, other_data))
+    
+    if not compatible_partners:
+        return False
+    
+    compatible_partners.sort(reverse=True)
+    
+    # Try to find blocks that work for both teams
+    for priority, partner_name, partner_data in compatible_partners:
+        partner_info = partner_data["info"]
+        
+        # First try blocks that match both teams' preferences
+        mutual_pref_blocks = find_mutual_preference_matches(team_info, partner_info, available_blocks, strict_only=False)
+        if mutual_pref_blocks:
+            best_block = find_best_block_for_teams_with_distribution(mutual_pref_blocks, team_info, partner_info, 
+                                                                   team_data, partner_data, rules_data, start_date)
+            if best_block and book_shared_practice(team_name, partner_name, team_data, partner_data, 
+                                                 best_block, start_date, schedule, validator):
+                print(f"    SHARED (with prefs): {team_name} + {partner_name}")
+                return True
+        
+        # Try any available block that works for both teams
+        for block in available_blocks:
+            if (is_block_available_for_team(block, team_info, team_data, rules_data, start_date) and
+                is_block_available_for_team(block, partner_info, partner_data, rules_data, start_date)):
+                
+                if book_shared_practice(team_name, partner_name, team_data, partner_data, 
+                                      block, start_date, schedule, validator):
+                    print(f"    SHARED (any available): {team_name} + {partner_name}")
+                    return True
+    
+    return False
+
+
+# =============================================================================
+# SECTION 7: AVAILABILITY CHECKING
+# =============================================================================
+
+def is_block_available_for_team(block: AvailableBlock, team_info: Dict, team_data: Dict, 
+                               rules_data: Dict, start_date: datetime.date) -> bool:
+    """Check if a block is available for a specific team."""
     required_duration = team_info.get("practice_duration", 60)
     
-    # Check 1: Block has enough time
     if not block.can_fit_duration(required_duration):
         return False
     
-    # Check 2: No blackout on this date
     if has_blackout_on_date(team_info, block.date):
         return False
     
-    # Check 3: Weekly quota check
     week_num = get_week_number(block.date, start_date)
     current_weekly_count = team_data["weekly_count"][week_num]
     
@@ -638,36 +715,14 @@ def is_block_available_for_team_capacity_phase(block: AvailableBlock, team_info:
     if current_weekly_count >= max_per_week:
         return False
     
-    # Check 4: Multiple per day restriction - CAPACITY PHASE RELAXED RULES
-    allow_multiple = _safe_allow_multiple(team_info)
-    sessions_on_date = len([d for d in team_data["scheduled_dates"] if d == block.date])
-    
-    if not allow_multiple and sessions_on_date >= 1:
-        return False
-    elif allow_multiple and sessions_on_date >= 2:  # Max 2 sessions per day even in capacity phase
-        return False
-    
     return True
-
-
-def calculate_same_day_penalty(team_data: dict, block_date: datetime.date) -> int:
-    """Calculate penalty for booking multiple sessions on same day to encourage distribution - MASSIVELY INCREASED."""
-    sessions_on_date = len([d for d in team_data["scheduled_dates"] if d == block_date])
-    
-    # MUCH HIGHER penalties to strongly discourage same-day sessions
-    if sessions_on_date == 0:
-        return 0        # No penalty for first session on this date
-    elif sessions_on_date == 1:
-        return 2000     # MASSIVE penalty for second session on same date
-    else:
-        return 10000    # EXTREME penalty for third+ session on same date
 
 
 def find_best_block_with_distribution(blocks: List[AvailableBlock], team_info: dict, team_data: dict,
                                     rules_data: Dict, start_date: datetime.date) -> Optional[AvailableBlock]:
     """Find best block considering preferences AND day distribution."""
     best_block = None
-    best_score = -999999  # Start with very low score to handle high penalties
+    best_score = -999999
     
     print(f"    DEBUG: Looking for blocks for team, currently scheduled on: {sorted(team_data['scheduled_dates'])}")
     
@@ -675,11 +730,22 @@ def find_best_block_with_distribution(blocks: List[AvailableBlock], team_info: d
         if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
             # Base preference score
             pref_score = get_block_preference_score(block, team_info)
+                       
+            # Reduced same-day penalty since consecutive sessions are now allowed
+            sessions_on_date = get_sessions_on_date_count(team_data, block.date)
             
-            # Same-day penalty to encourage distribution
-            same_day_penalty = calculate_same_day_penalty(team_data, block.date)
+            if sessions_on_date == 0:
+                same_day_penalty = 0
+            elif sessions_on_date == 1:
+                # Check if this would be consecutive - much lower penalty if so
+                if is_consecutive_with_existing_session("temp_team", team_data, block, []):
+                    same_day_penalty = 50   # Small penalty for consecutive sessions
+                else:
+                    same_day_penalty = 500  # Higher penalty for non-consecutive
+            else:
+                same_day_penalty = 2000     # High penalty for 3+ sessions
             
-            # Final score encourages day diversity
+            # Final score encourages day diversity but allows consecutive sessions
             final_score = pref_score - same_day_penalty
             
             print(f"    DEBUG: Block {block.arena} {block.date} {block.start_time}-{block.end_time}: pref={pref_score}, penalty={same_day_penalty}, final={final_score}")
@@ -701,7 +767,7 @@ def find_best_block_for_teams_with_distribution(blocks: List[AvailableBlock], te
                                               start_date: datetime.date) -> Optional[AvailableBlock]:
     """Find the best block for two teams considering preferences AND day distribution."""
     best_block = None
-    best_score = -999999  # Start with very low score to handle high penalties
+    best_score = -999999
     
     for block in blocks:
         if (is_block_available_for_team(block, team1_info, team1_data, rules_data, start_date) and
@@ -712,12 +778,14 @@ def find_best_block_for_teams_with_distribution(blocks: List[AvailableBlock], te
             score2 = get_block_preference_score(block, team2_info)
             combined_pref_score = score1 + score2
             
-            # Same-day penalties for both teams
-            penalty1 = calculate_same_day_penalty(team1_data, block.date)
-            penalty2 = calculate_same_day_penalty(team2_data, block.date)
+            # Same-day penalties for both teams (reduced for consecutive sessions)
+            sessions1 = get_sessions_on_date_count(team1_data, block.date)
+            sessions2 = get_sessions_on_date_count(team2_data, block.date)
+            
+            penalty1 = 50 if sessions1 == 1 else 0
+            penalty2 = 50 if sessions2 == 1 else 0
             combined_penalty = penalty1 + penalty2
             
-            # Final score encourages day diversity for both teams
             final_score = combined_pref_score - combined_penalty
             
             if final_score > best_score:
@@ -728,632 +796,19 @@ def find_best_block_for_teams_with_distribution(blocks: List[AvailableBlock], te
 
 
 # =============================================================================
-# SECTION 6: SAME-DAY SESSION PREVENTION (NEW)
-# =============================================================================
-
-def is_back_to_back_with_existing_session(team_name: str, team_data: dict, new_block: AvailableBlock, 
-                                        schedule: List[dict]) -> bool:
-    """Check if a new booking would be back-to-back with existing session on same date."""
-    existing_sessions = [
-        event for event in schedule 
-        if (event.get("team") == team_name and 
-            event.get("date") == new_block.date.isoformat())
-    ]
-    
-    if not existing_sessions:
-        return True  # No existing sessions, so it's fine
-    
-    for session in existing_sessions:
-        try:
-            existing_start_str, existing_end_str = session["time_slot"].split("-")
-            existing_start = datetime.datetime.strptime(existing_start_str, "%H:%M").time()
-            existing_end = datetime.datetime.strptime(existing_end_str, "%H:%M").time()
-            
-            # Check if new block starts when existing ends, or vice versa
-            if (new_block.start_time == existing_end or 
-                new_block.end_time == existing_start):
-                return True
-        except:
-            continue
-    
-    return False  # Not back-to-back
-
-
-def get_sessions_on_date_count(team_data: dict, check_date: datetime.date) -> int:
-    """Get count of sessions a team has on a specific date."""
-    return len([d for d in team_data["scheduled_dates"] if d == check_date])
-
-
-def should_allow_same_day_booking(team_name: str, team_data: dict, new_block: AvailableBlock, 
-                                schedule: List[dict], booking_type: str, allow_multiple: bool) -> bool:
-    """Determine if a same-day booking should be allowed based on strict rules."""
-    sessions_on_date = get_sessions_on_date_count(team_data, new_block.date)
-    
-    # PHASE 0 & 1: Strict same-day prevention (only 1 session per day)
-    if booking_type in ["strict preference", "preferred time", "forced minimum", "practice", "relaxed"]:
-        if sessions_on_date >= 1:
-            print(f"    SAME-DAY PREVENTION: {team_name} already has {sessions_on_date} sessions on {new_block.date} - BLOCKING same-day allocation")
-            return False
-    
-    # PHASE 2 (capacity): Allow 2nd session ONLY if back-to-back AND team allows multiple
-    elif booking_type in ["capacity fill"]:
-        if sessions_on_date >= 2:
-            print(f"    SAME-DAY PREVENTION: {team_name} already has {sessions_on_date} sessions on {new_block.date} - BLOCKING (max 2 per day)")
-            return False
-        elif sessions_on_date == 1:
-            if not allow_multiple:
-                print(f"    SAME-DAY PREVENTION: {team_name} doesn't allow multiple per day - BLOCKING")
-                return False
-            elif not is_back_to_back_with_existing_session(team_name, team_data, new_block, schedule):
-                print(f"    SAME-DAY PREVENTION: {team_name} session on {new_block.date} would not be back-to-back - BLOCKING")
-                return False
-    
-    return True
-
-
-# =============================================================================
-# SECTION 7: SMART MINIMUM GUARANTEE ALLOCATION (FIXED)
-# =============================================================================
-
-def allocate_smart_minimum_guarantee(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
-                                   start_date: datetime.date, schedule: List[Dict],
-                                   rules_data: Dict, validator: ScheduleConflictValidator) -> int:
-    """
-    PHASE 0: Smart Minimum Guarantee - Every team gets at least 1 session while respecting preferences.
-    FIXED: Strict same-day prevention - only 1 session per day in this phase.
-    """
-    allocated_count = 0
-    
-    print("\n" + "="*80)
-    print("PHASE 0: SMART MINIMUM GUARANTEE ALLOCATION")
-    print("="*80)
-    print("Strategy: Everyone gets 1+ session, STRICT same-day prevention, preferences respected")
-    
-    # Sort teams by constraint complexity (most constrained first)
-    teams_by_complexity = []
-    for team_name, team_data in teams_needing_slots.items():
-        if team_data["needed"] > 0:
-            complexity = calculate_constraint_complexity(team_data["info"], team_name)
-            teams_by_complexity.append((complexity, team_name, team_data))
-    
-    teams_by_complexity.sort(reverse=True)  # Most constrained first
-    
-    print(f"Processing {len(teams_by_complexity)} teams needing ice (by constraint complexity)")
-    
-    for complexity, team_name, team_data in teams_by_complexity:
-        team_info = team_data["info"]
-        
-        if team_data["needed"] <= 0:
-            continue
-        
-        print(f"\n--- {team_name} (complexity: {complexity}, needs: {team_data['needed']}) ---")
-        
-        allocated = False
-        
-        # STRATEGY 1: Try optimal constrained allocation
-        if has_mandatory_shared_ice(team_info):
-            print(f"  Trying mandatory shared ice with preference matching...")
-            allocated = try_mandatory_shared_with_preferences(team_name, team_data, teams_needing_slots, 
-                                                             available_blocks, start_date, schedule, 
-                                                             rules_data, validator)
-        elif has_strict_preferences(team_info):
-            print(f"  Trying strict preference allocation...")
-            allocated = try_strict_preference_allocation(team_name, team_data, available_blocks, 
-                                                       start_date, schedule, rules_data, validator)
-        else:
-            print(f"  Trying preferred time allocation...")
-            allocated = try_preferred_time_allocation(team_name, team_data, available_blocks, 
-                                                    start_date, schedule, rules_data, validator)
-        
-        if allocated:
-            allocated_count += 1
-            print(f"  SUCCESS: Optimal allocation achieved")
-            continue
-        
-        # STRATEGY 2: Try relaxed allocation (ignore strict preferences, try any preferences)
-        print(f"  Optimal failed, trying relaxed allocation...")
-        if has_mandatory_shared_ice(team_info):
-            allocated = try_mandatory_shared_relaxed(team_name, team_data, teams_needing_slots, 
-                                                   available_blocks, start_date, schedule, 
-                                                   rules_data, validator)
-        else:
-            allocated = try_any_preference_allocation(team_name, team_data, available_blocks, 
-                                                    start_date, schedule, rules_data, validator)
-        
-        if allocated:
-            allocated_count += 1
-            print(f"  SUCCESS: Relaxed allocation achieved")
-            continue
-        
-        # STRATEGY 3: Force any available slot (guarantee minimum)
-        print(f"  Relaxed failed, forcing any available slot...")
-        allocated = force_any_available_allocation(team_name, team_data, available_blocks, 
-                                                 start_date, schedule, rules_data, validator)
-        
-        if allocated:
-            allocated_count += 1
-            print(f"  SUCCESS: Forced allocation - minimum guarantee met")
-        else:
-            print(f"  FAILED: No available slots found (likely blackouts or no capacity)")
-    
-    print(f"\nPHASE 0 COMPLETE: {allocated_count} minimum guarantee allocations")
-    print("="*80)
-    return allocated_count
-
-
-def try_mandatory_shared_with_preferences(team_name: str, team_data: dict, teams_needing_slots: Dict,
-                                        available_blocks: List[AvailableBlock], start_date: datetime.date,
-                                        schedule: List[Dict], rules_data: Dict, 
-                                        validator: ScheduleConflictValidator) -> bool:
-    """Try to allocate mandatory shared ice while respecting preferences."""
-    team_info = team_data["info"]
-    
-    # Find compatible partners
-    compatible_partners = []
-    for other_name, other_data in teams_needing_slots.items():
-        if (other_name != team_name and 
-            other_data["needed"] > 0 and
-            can_teams_share_ice(team_info, other_data["info"], team_name, other_name)):
-            compatible_partners.append((other_name, other_data))
-    
-    if not compatible_partners:
-        return False
-    
-    # Try to find blocks that work for both teams with preferences
-    for partner_name, partner_data in compatible_partners:
-        partner_info = partner_data["info"]
-        
-        # First try strict preference matches if both have them
-        if has_strict_preferences(team_info) and has_strict_preferences(partner_info):
-            mutual_blocks = find_mutual_strict_preference_matches(team_info, partner_info, available_blocks)
-            if mutual_blocks:
-                best_block = find_best_block_for_teams(mutual_blocks, team_info, partner_info, 
-                                                     team_data, partner_data, rules_data, start_date)
-                if best_block and book_shared_practice(team_name, partner_name, team_data, partner_data, 
-                                                     best_block, start_date, schedule, validator):
-                    print(f"    SHARED (strict prefs): {team_name} + {partner_name}")
-                    return True
-        
-        # Try any preference matches
-        mutual_blocks = find_mutual_preference_matches(team_info, partner_info, available_blocks, strict_only=False)
-        if mutual_blocks:
-            best_block = find_best_block_for_teams(mutual_blocks, team_info, partner_info, 
-                                                 team_data, partner_data, rules_data, start_date)
-            if best_block and book_shared_practice(team_name, partner_name, team_data, partner_data, 
-                                                 best_block, start_date, schedule, validator):
-                print(f"    SHARED (any prefs): {team_name} + {partner_name}")
-                return True
-    
-    return False
-
-
-def try_mandatory_shared_relaxed(team_name: str, team_data: dict, teams_needing_slots: Dict,
-                               available_blocks: List[AvailableBlock], start_date: datetime.date,
-                               schedule: List[Dict], rules_data: Dict, 
-                               validator: ScheduleConflictValidator) -> bool:
-    """Try to allocate mandatory shared ice ignoring preferences."""
-    team_info = team_data["info"]
-    
-    # Find compatible partners
-    compatible_partners = []
-    for other_name, other_data in teams_needing_slots.items():
-        if (other_name != team_name and 
-            other_data["needed"] > 0 and
-            can_teams_share_ice(team_info, other_data["info"], team_name, other_name)):
-            compatible_partners.append((other_name, other_data))
-    
-    if not compatible_partners:
-        return False
-    
-    # Try any available block that works for both teams
-    for partner_name, partner_data in compatible_partners:
-        partner_info = partner_data["info"]
-        
-        for block in available_blocks:
-            if (is_block_available_for_team(block, team_info, team_data, rules_data, start_date) and
-                is_block_available_for_team(block, partner_info, partner_data, rules_data, start_date)):
-                
-                if book_shared_practice(team_name, partner_name, team_data, partner_data, 
-                                      block, start_date, schedule, validator):
-                    print(f"    SHARED (no prefs): {team_name} + {partner_name}")
-                    return True
-    
-    return False
-
-
-def try_strict_preference_allocation(team_name: str, team_data: dict, available_blocks: List[AvailableBlock],
-                                   start_date: datetime.date, schedule: List[Dict], rules_data: Dict,
-                                   validator: ScheduleConflictValidator) -> bool:
-    """Try to allocate individual session matching strict preferences."""
-    team_info = team_data["info"]
-    
-    strict_matches = find_exact_strict_preference_matches(team_info, available_blocks)
-    
-    for block in strict_matches:
-        if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
-            if book_team_practice(team_name, team_data, block, start_date, schedule, validator, "strict preference"):
-                print(f"    INDIVIDUAL (strict): {team_name}")
-                return True
-    
-    return False
-
-
-def try_preferred_time_allocation(team_name: str, team_data: dict, available_blocks: List[AvailableBlock],
-                                start_date: datetime.date, schedule: List[Dict], rules_data: Dict,
-                                validator: ScheduleConflictValidator) -> bool:
-    """Try to allocate individual session matching any preferences."""
-    team_info = team_data["info"]
-    
-    preferred_matches = find_preferred_time_matches(team_info, available_blocks, strict_only=False)
-    
-    for block in preferred_matches:
-        if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
-            if book_team_practice(team_name, team_data, block, start_date, schedule, validator, "preferred time"):
-                print(f"    INDIVIDUAL (preferred): {team_name}")
-                return True
-    
-    return False
-
-
-def try_any_preference_allocation(team_name: str, team_data: dict, available_blocks: List[AvailableBlock],
-                                start_date: datetime.date, schedule: List[Dict], rules_data: Dict,
-                                validator: ScheduleConflictValidator) -> bool:
-    """Try to allocate individual session in any preferred time (relaxed)."""
-    return try_preferred_time_allocation(team_name, team_data, available_blocks, start_date, schedule, rules_data, validator)
-
-
-def force_any_available_allocation(team_name: str, team_data: dict, available_blocks: List[AvailableBlock],
-                                 start_date: datetime.date, schedule: List[Dict], rules_data: Dict,
-                                 validator: ScheduleConflictValidator) -> bool:
-    """Force allocation in any available block (last resort)."""
-    team_info = team_data["info"]
-    
-    for block in available_blocks:
-        if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
-            if book_team_practice(team_name, team_data, block, start_date, schedule, validator, "forced minimum"):
-                print(f"    INDIVIDUAL (forced): {team_name}")
-                return True
-    
-    return False
-
-
-def find_best_block_for_teams(blocks: List[AvailableBlock], team1_info: dict, team2_info: dict,
-                            team1_data: dict, team2_data: dict, rules_data: Dict, start_date: datetime.date) -> Optional[AvailableBlock]:
-    """Find the best block for two teams from a list of candidates."""
-    best_block = None
-    best_score = -1
-    
-    for block in blocks:
-        if (is_block_available_for_team(block, team1_info, team1_data, rules_data, start_date) and
-            is_block_available_for_team(block, team2_info, team2_data, rules_data, start_date)):
-            
-            score1 = get_block_preference_score(block, team1_info)
-            score2 = get_block_preference_score(block, team2_info)
-            combined_score = score1 + score2
-            
-            if combined_score > best_score:
-                best_score = combined_score
-                best_block = block
-    
-    return best_block
-
-
-# =============================================================================
-# SECTION 8: PREFERENCE OPTIMIZATION ALLOCATION (PHASE 1 - FIXED)
-# =============================================================================
-
-def allocate_preference_optimization(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
-                                   start_date: datetime.date, schedule: List[Dict],
-                                   rules_data: Dict, validator: ScheduleConflictValidator) -> int:
-    """
-    PHASE 1: Preference Optimization - Add more sessions while respecting preferences.
-    FIXED: Round-robin allocation to prevent same team getting multiple sessions per iteration.
-    """
-    allocated_count = 0
-    
-    print("\n" + "="*80)
-    print("PHASE 1: PREFERENCE OPTIMIZATION ALLOCATION")
-    print("="*80)
-    print("Strategy: Add more sessions with preferences, STRICT same-day prevention, round-robin fairness")
-    
-    max_iterations = 25
-    iteration = 0
-    
-    while iteration < max_iterations:
-        iteration += 1
-        progress_made = False
-        
-        # Get teams still needing slots, sorted by priority
-        teams_needing = []
-        for team_name, team_data in teams_needing_slots.items():
-            if team_data["needed"] > 0:
-                priority = calculate_team_priority(team_data["info"], team_name)
-                teams_needing.append((priority, team_name, team_data))
-        
-        if not teams_needing:
-            print(f"All teams satisfied after {iteration-1} iterations")
-            break
-        
-        teams_needing.sort()  # Lower priority number = higher priority
-        
-        print(f"\nIteration {iteration}: {len(teams_needing)} teams need more sessions")
-        
-        # ROUND ROBIN: Only allow ONE allocation per iteration to ensure fairness
-        allocation_made_this_iteration = False
-        
-        # Try mandatory shared ice first (highest preference)
-        for priority, team_name, team_data in teams_needing:
-            if team_data["needed"] <= 0 or allocation_made_this_iteration:
-                continue
-                
-            team_info = team_data["info"]
-            
-            if has_mandatory_shared_ice(team_info):
-                if try_mandatory_shared_with_preferences(team_name, team_data, teams_needing_slots,
-                                                       available_blocks, start_date, schedule, 
-                                                       rules_data, validator):
-                    allocated_count += 1
-                    progress_made = True
-                    allocation_made_this_iteration = True
-                    print(f"  MANDATORY SHARED: {team_name}")
-                    break
-        
-        if allocation_made_this_iteration:
-            continue
-        
-        # Try strict preference allocations
-        for priority, team_name, team_data in teams_needing:
-            if team_data["needed"] <= 0 or allocation_made_this_iteration:
-                continue
-                
-            team_info = team_data["info"]
-            
-            if has_strict_preferences(team_info):
-                if try_strict_preference_allocation(team_name, team_data, available_blocks,
-                                                  start_date, schedule, rules_data, validator):
-                    allocated_count += 1
-                    progress_made = True
-                    allocation_made_this_iteration = True
-                    print(f"  STRICT PREFERENCE: {team_name}")
-                    break
-        
-        if allocation_made_this_iteration:
-            continue
-        
-        # Try preferred time allocations
-        for priority, team_name, team_data in teams_needing:
-            if team_data["needed"] <= 0 or allocation_made_this_iteration:
-                continue
-            
-            if try_preferred_time_allocation(team_name, team_data, available_blocks,
-                                           start_date, schedule, rules_data, validator):
-                allocated_count += 1
-                progress_made = True
-                allocation_made_this_iteration = True
-                print(f"  PREFERRED TIME: {team_name}")
-                break
-        
-        if allocation_made_this_iteration:
-            continue
-        
-        # Try regular shared ice for non-mandatory teams
-        for i, (priority1, team1_name, team1_data) in enumerate(teams_needing):
-            if team1_data["needed"] <= 0 or allocation_made_this_iteration:
-                continue
-                
-            team1_info = team1_data["info"]
-            if not team1_info.get("allow_shared_ice", True):
-                continue
-                
-            for j, (priority2, team2_name, team2_data) in enumerate(teams_needing[i+1:], i+1):
-                if team2_data["needed"] <= 0:
-                    continue
-                
-                team2_info = team2_data["info"]
-                if not team2_info.get("allow_shared_ice", True):
-                    continue
-                
-                if can_teams_share_ice(team1_info, team2_info, team1_name, team2_name):
-                    # Try shared with preferences first
-                    mutual_blocks = find_mutual_preference_matches(team1_info, team2_info, available_blocks, strict_only=False)
-                    if mutual_blocks:
-                        best_block = find_best_block_for_teams(mutual_blocks, team1_info, team2_info,
-                                                             team1_data, team2_data, rules_data, start_date)
-                        if best_block and book_shared_practice(team1_name, team2_name, team1_data, team2_data,
-                                                             best_block, start_date, schedule, validator):
-                            allocated_count += 1
-                            progress_made = True
-                            allocation_made_this_iteration = True
-                            print(f"  SHARED (preferred): {team1_name} + {team2_name}")
-                            break
-            
-            if allocation_made_this_iteration:
-                break
-        
-        if allocation_made_this_iteration:
-            continue
-        
-        # Try any available allocation (with distribution awareness)
-        for priority, team_name, team_data in teams_needing:
-            if team_data["needed"] <= 0 or allocation_made_this_iteration:
-                continue
-            
-            team_info = team_data["info"]
-            individual_blocks = [block for block in available_blocks 
-                               if is_block_available_for_team(block, team_info, team_data, rules_data, start_date)]
-            
-            if individual_blocks:
-                best_block = find_best_block_with_distribution(individual_blocks, team_info, team_data, rules_data, start_date)
-                if best_block and book_team_practice(team_name, team_data, best_block, start_date, schedule, validator, "relaxed"):
-                    allocated_count += 1
-                    progress_made = True
-                    allocation_made_this_iteration = True
-                    print(f"  ANY AVAILABLE: {team_name}")
-                    break
-        
-        if not progress_made:
-            print(f"  No progress in iteration {iteration}, stopping")
-            break
-    
-    print(f"\nPHASE 1 COMPLETE: {allocated_count} preference optimization allocations")
-    print("="*80)
-    return allocated_count
-
-
-# =============================================================================
-# SECTION 9: CAPACITY MAXIMIZATION (PHASE 2 - FIXED)
-# =============================================================================
-
-def allocate_capacity_maximization(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
-                                 start_date: datetime.date, schedule: List[Dict],
-                                 rules_data: Dict, validator: ScheduleConflictValidator) -> int:
-    """
-    PHASE 2: Capacity Maximization - Use remaining ice time, allow 2nd session per day ONLY if back-to-back.
-    """
-    allocated_count = 0
-    
-    print("\n" + "="*80)
-    print("PHASE 2: CAPACITY MAXIMIZATION")
-    print("="*80)
-    print("Strategy: Fill remaining slots, allow 2nd session per day ONLY if back-to-back")
-    
-    max_iterations = 15
-    iteration = 0
-    
-    while iteration < max_iterations:
-        iteration += 1
-        progress_made = False
-        
-        # Get all teams that could use more ice (not just those that "need" it)
-        teams_wanting_more = []
-        for team_name, team_data in teams_needing_slots.items():
-            if team_data["needed"] > 0:  # Still have official need
-                priority = 0  # High priority for teams with remaining need
-                teams_wanting_more.append((priority, team_name, team_data))
-            else:
-                # Teams that are satisfied but could take extra ice
-                team_type = team_data["info"].get("type")
-                team_age = team_data["info"].get("age")
-                max_per_week = (rules_data.get("ice_times_per_week", {})
-                               .get(team_type, {}).get(team_age, 0))
-                
-                # Check if team could take more ice in any week
-                total_weeks = max(1, len(team_data["weekly_count"]))
-                for week_num in range(1, total_weeks + 1):
-                    if team_data["weekly_count"][week_num] < max_per_week:
-                        priority = 100  # Lower priority for extra ice
-                        teams_wanting_more.append((priority, team_name, team_data))
-                        break
-        
-        if not teams_wanting_more:
-            print(f"No teams want more ice after {iteration-1} iterations")
-            break
-        
-        teams_wanting_more.sort()  # Priority order
-        
-        print(f"\nIteration {iteration}: {len(teams_wanting_more)} teams want more ice")
-        
-        # ROUND ROBIN: Only one allocation per iteration
-        allocation_made = False
-        
-        # Try to fill any remaining capacity
-        for priority, team_name, team_data in teams_wanting_more:
-            if allocation_made:
-                break
-                
-            team_info = team_data["info"]
-            
-            # Check if team can actually take more ice this week
-            can_take_more = False
-            for block in available_blocks:
-                week_num = get_week_number(block.date, start_date)
-                current_weekly = team_data["weekly_count"][week_num]
-                team_type = team_info.get("type")
-                team_age = team_info.get("age")
-                max_per_week = (rules_data.get("ice_times_per_week", {})
-                               .get(team_type, {}).get(team_age, 0))
-                
-                if current_weekly < max_per_week:
-                    can_take_more = True
-                    break
-            
-            if not can_take_more:
-                continue
-            
-            # Try shared ice first (more efficient use of ice time)
-            if team_info.get("allow_shared_ice", True):
-                for other_priority, other_name, other_data in teams_wanting_more:
-                    if (other_name != team_name and 
-                        can_teams_share_ice(team_info, other_data["info"], team_name, other_name)):
-                        
-                        # Use capacity-phase availability checking
-                        shared_blocks = []
-                        for block in available_blocks:
-                            if (is_block_available_for_team_capacity_phase(block, team_info, team_data, rules_data, start_date) and
-                                is_block_available_for_team_capacity_phase(block, other_data["info"], other_data, rules_data, start_date)):
-                                shared_blocks.append(block)
-                        
-                        if shared_blocks:
-                            best_block = find_best_block_for_teams_with_distribution(shared_blocks, team_info, other_data["info"],
-                                                                                   team_data, other_data, rules_data, start_date)
-                            if best_block and book_shared_practice(team_name, other_name, team_data, other_data,
-                                                                 best_block, start_date, schedule, validator):
-                                allocated_count += 1
-                                progress_made = True
-                                allocation_made = True
-                                print(f"  CAPACITY SHARED: {team_name} + {other_name}")
-                                
-                                # Remove block if it's too small for more bookings
-                                if best_block.remaining_minutes() < 30:
-                                    available_blocks.remove(best_block)
-                                break
-                        
-                        if allocation_made:
-                            break
-                
-                if allocation_made:
-                    break
-            
-            # Try individual allocation with back-to-back checking
-            individual_blocks = [block for block in available_blocks 
-                               if is_block_available_for_team_capacity_phase(block, team_info, team_data, rules_data, start_date)]
-            
-            if individual_blocks:
-                best_block = find_best_block_with_distribution(individual_blocks, team_info, team_data, rules_data, start_date)
-                if best_block and book_team_practice(team_name, team_data, best_block, start_date, schedule, validator, "capacity fill"):
-                    allocated_count += 1
-                    progress_made = True
-                    allocation_made = True
-                    print(f"  CAPACITY INDIVIDUAL: {team_name}")
-                    
-                    # Remove block if it's too small for more bookings
-                    if best_block.remaining_minutes() < 30:
-                        available_blocks.remove(best_block)
-                    break
-        
-        if not progress_made:
-            print(f"  No progress in iteration {iteration}, stopping")
-            break
-    
-    print(f"\nPHASE 2 COMPLETE: {allocated_count} capacity maximization allocations")
-    print("="*80)
-    return allocated_count
-
-
-# =============================================================================
-# SECTION 10: BOOKING FUNCTIONS (FIXED)
+# SECTION 8: BOOKING FUNCTIONS (ENHANCED)
 # =============================================================================
 
 def book_team_practice(team_name: str, team_data: dict, block: AvailableBlock, 
                       start_date: datetime.date, schedule: List[dict], 
                       validator: ScheduleConflictValidator, booking_type: str = "practice") -> bool:
-    """Book a team practice session - FIXED with strict same-day prevention."""
+    """Enhanced team practice booking with consecutive session rules."""
     required_duration = team_data["info"].get("practice_duration", 60)
     
     if not block.can_fit_duration(required_duration):
         return False
     
-    # CRITICAL SAME-DAY CHECK: Apply strict same-day prevention rules
+    # Apply same-day rules
     allow_multiple = _safe_allow_multiple(team_data["info"])
     
     if not should_allow_same_day_booking(team_name, team_data, block, schedule, booking_type, allow_multiple):
@@ -1371,7 +826,6 @@ def book_team_practice(team_name: str, team_data: dict, block: AvailableBlock,
     is_valid, conflicts = validator.validate_booking(team_name, block.arena, date_str, time_slot_str)
     
     if not is_valid:
-        # Remove the booking we just added
         block.bookings.pop()
         return False
     
@@ -1393,7 +847,6 @@ def book_team_practice(team_name: str, team_data: dict, block: AvailableBlock,
     team_data["weekly_count"][week_num] += 1
     team_data["scheduled_dates"].add(block.date)
     
-    # Show session count AFTER adding to scheduled_dates for accurate count
     new_sessions_on_date = len([d for d in team_data["scheduled_dates"] if d == block.date])
     print(f"    BOOKED: {team_name} on {block.date} {booking_start}-{booking_end} (sessions on this date: {new_sessions_on_date})")
     
@@ -1403,7 +856,7 @@ def book_team_practice(team_name: str, team_data: dict, block: AvailableBlock,
 def book_shared_practice(team1_name: str, team2_name: str, team1_data: dict, 
                         team2_data: dict, block: AvailableBlock, start_date: datetime.date, 
                         schedule: List[dict], validator: ScheduleConflictValidator) -> bool:
-    """Book a shared practice session - FIXED with strict same-day prevention."""
+    """Enhanced shared practice booking with consecutive session rules."""
     team1_duration = team1_data["info"].get("practice_duration", 60)
     team2_duration = team2_data["info"].get("practice_duration", 60)
     required_duration = max(team1_duration, team2_duration)
@@ -1415,7 +868,6 @@ def book_shared_practice(team1_name: str, team2_name: str, team1_data: dict,
     allow_multiple1 = _safe_allow_multiple(team1_data["info"])
     allow_multiple2 = _safe_allow_multiple(team2_data["info"])
     
-    # For shared ice, use a more permissive booking type since we're being efficient
     if not should_allow_same_day_booking(team1_name, team1_data, block, schedule, "shared practice", allow_multiple1):
         return False
     if not should_allow_same_day_booking(team2_name, team2_data, block, schedule, "shared practice", allow_multiple2):
@@ -1463,8 +915,610 @@ def book_shared_practice(team1_name: str, team2_name: str, team1_data: dict,
     return True
 
 
+def book_extended_practice(team_name: str, team_data: dict, block: AvailableBlock, 
+                         duration: int, start_date: datetime.date, schedule: List[dict], 
+                         validator: ScheduleConflictValidator) -> bool:
+    """Book practice using specified duration (can exceed team's normal practice time)."""
+    
+    if not block.can_fit_duration(duration):
+        return False
+    
+    try:
+        booking_start, booking_end = block.add_booking(team_name, duration, "extended utilization")
+    except ValueError:
+        return False
+    
+    # Validate booking
+    date_str = block.date.isoformat()
+    time_slot_str = f"{booking_start.strftime('%H:%M')}-{booking_end.strftime('%H:%M')}"
+    
+    is_valid, _ = validator.validate_booking(team_name, block.arena, date_str, time_slot_str)
+    if not is_valid:
+        block.bookings.pop()
+        return False
+    
+    # Create schedule entry
+    booking = {
+        "team": team_name,
+        "opponent": "Practice",
+        "arena": block.arena,
+        "date": date_str,
+        "time_slot": time_slot_str,
+        "type": f"practice (extended utilization - {duration}min)"
+    }
+    
+    # Update tracking (but don't count against weekly quota since this is extra)
+    schedule.append(booking)
+    validator.add_booking(team_name, block.arena, date_str, time_slot_str)
+    team_data["scheduled_dates"].add(block.date)
+    
+    return True
+
+
 # =============================================================================
-# SECTION 11: MAIN SCHEDULER FUNCTION (FIXED)
+# SECTION 9: ALLOCATION STRATEGIES (ENHANCED)
+# =============================================================================
+
+def try_strict_preference_allocation(team_name: str, team_data: dict, available_blocks: List[AvailableBlock],
+                                   start_date: datetime.date, schedule: List[Dict], rules_data: Dict,
+                                   validator: ScheduleConflictValidator) -> bool:
+    """Try to allocate individual session matching strict preferences."""
+    team_info = team_data["info"]
+    
+    strict_matches = find_exact_strict_preference_matches(team_info, available_blocks)
+    
+    for block in strict_matches:
+        if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
+            if book_team_practice(team_name, team_data, block, start_date, schedule, validator, "strict preference"):
+                print(f"    INDIVIDUAL (strict): {team_name}")
+                return True
+    
+    return False
+
+
+def try_preferred_time_allocation(team_name: str, team_data: dict, teams_needing_slots: Dict,
+                                available_blocks: List[AvailableBlock], start_date: datetime.date, 
+                                schedule: List[Dict], rules_data: Dict,
+                                validator: ScheduleConflictValidator) -> bool:
+    """Enhanced preferred time allocation that tries shared ice if individual fails."""
+    team_info = team_data["info"]
+    
+    # First try individual allocation with preferences
+    preferred_matches = find_preferred_time_matches(team_info, available_blocks, strict_only=False)
+    
+    for block in preferred_matches:
+        if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
+            if book_team_practice(team_name, team_data, block, start_date, schedule, validator, "preferred time"):
+                print(f"    INDIVIDUAL (preferred): {team_name}")
+                return True
+    
+    # If individual preferred allocation failed, try shared ice
+    if team_info.get("allow_shared_ice", True):
+        return try_shared_ice_for_any_team(team_name, team_data, teams_needing_slots, available_blocks, 
+                                         start_date, schedule, rules_data, validator, "preferred shared")
+    
+    return False
+
+
+def try_any_preference_allocation(team_name: str, team_data: dict, teams_needing_slots: Dict,
+                                available_blocks: List[AvailableBlock], start_date: datetime.date, 
+                                schedule: List[Dict], rules_data: Dict,
+                                validator: ScheduleConflictValidator) -> bool:
+    """Try to allocate individual session in any preferred time (relaxed)."""
+    return try_preferred_time_allocation(team_name, team_data, teams_needing_slots, available_blocks, start_date, schedule, rules_data, validator)
+
+
+def force_any_available_allocation(team_name: str, team_data: dict, teams_needing_slots: Dict,
+                                 available_blocks: List[AvailableBlock], start_date: datetime.date, 
+                                 schedule: List[Dict], rules_data: Dict,
+                                 validator: ScheduleConflictValidator) -> bool:
+    """Enhanced force allocation that tries shared ice before giving up."""
+    team_info = team_data["info"]
+    
+    # First try any individual block
+    for block in available_blocks:
+        if is_block_available_for_team(block, team_info, team_data, rules_data, start_date):
+            if book_team_practice(team_name, team_data, block, start_date, schedule, validator, "forced minimum"):
+                print(f"    INDIVIDUAL (forced): {team_name}")
+                return True
+    
+    # If no individual blocks work, try shared ice as last resort
+    if team_info.get("allow_shared_ice", True):
+        if try_shared_ice_for_any_team(team_name, team_data, teams_needing_slots, available_blocks, 
+                                     start_date, schedule, rules_data, validator, "forced shared"):
+            print(f"    SHARED (forced): {team_name}")
+            return True
+    
+    return False
+
+
+def try_mandatory_shared_with_preferences(team_name: str, team_data: dict, teams_needing_slots: Dict,
+                                        available_blocks: List[AvailableBlock], start_date: datetime.date,
+                                        schedule: List[Dict], rules_data: Dict, 
+                                        validator: ScheduleConflictValidator) -> bool:
+    """Try to allocate mandatory shared ice while respecting preferences."""
+    team_info = team_data["info"]
+    
+    # Find compatible partners
+    compatible_partners = []
+    for other_name, other_data in teams_needing_slots.items():
+        if (other_name != team_name and 
+            other_data["needed"] > 0 and
+            can_teams_share_ice(team_info, other_data["info"], team_name, other_name)):
+            compatible_partners.append((other_name, other_data))
+    
+    if not compatible_partners:
+        return False
+    
+    # Try to find blocks that work for both teams with preferences
+    for partner_name, partner_data in compatible_partners:
+        partner_info = partner_data["info"]
+        
+        # First try strict preference matches if both have them
+        if has_strict_preferences(team_info) and has_strict_preferences(partner_info):
+            mutual_blocks = find_mutual_preference_matches(team_info, partner_info, available_blocks, strict_only=True)
+            if mutual_blocks:
+                best_block = find_best_block_for_teams_with_distribution(mutual_blocks, team_info, partner_info, 
+                                                     team_data, partner_data, rules_data, start_date)
+                if best_block and book_shared_practice(team_name, partner_name, team_data, partner_data, 
+                                                     best_block, start_date, schedule, validator):
+                    print(f"    SHARED (strict prefs): {team_name} + {partner_name}")
+                    return True
+        
+        # Try any preference matches
+        mutual_blocks = find_mutual_preference_matches(team_info, partner_info, available_blocks, strict_only=False)
+        if mutual_blocks:
+            best_block = find_best_block_for_teams_with_distribution(mutual_blocks, team_info, partner_info, 
+                                                 team_data, partner_data, rules_data, start_date)
+            if best_block and book_shared_practice(team_name, partner_name, team_data, partner_data, 
+                                                 best_block, start_date, schedule, validator):
+                print(f"    SHARED (any prefs): {team_name} + {partner_name}")
+                return True
+    
+    return False
+
+
+def try_mandatory_shared_relaxed(team_name: str, team_data: dict, teams_needing_slots: Dict,
+                               available_blocks: List[AvailableBlock], start_date: datetime.date,
+                               schedule: List[Dict], rules_data: Dict, 
+                               validator: ScheduleConflictValidator) -> bool:
+    """Try to allocate mandatory shared ice ignoring preferences."""
+    team_info = team_data["info"]
+    
+    # Find compatible partners
+    compatible_partners = []
+    for other_name, other_data in teams_needing_slots.items():
+        if (other_name != team_name and 
+            other_data["needed"] > 0 and
+            can_teams_share_ice(team_info, other_data["info"], team_name, other_name)):
+            compatible_partners.append((other_name, other_data))
+    
+    if not compatible_partners:
+        return False
+    
+    # Try any available block that works for both teams
+    for partner_name, partner_data in compatible_partners:
+        partner_info = partner_data["info"]
+        
+        for block in available_blocks:
+            if (is_block_available_for_team(block, team_info, team_data, rules_data, start_date) and
+                is_block_available_for_team(block, partner_info, partner_data, rules_data, start_date)):
+                
+                if book_shared_practice(team_name, partner_name, team_data, partner_data, 
+                                      block, start_date, schedule, validator):
+                    print(f"    SHARED (no prefs): {team_name} + {partner_name}")
+                    return True
+    
+    return False
+
+
+# =============================================================================
+# SECTION 10: PHASE ALLOCATION FUNCTIONS
+# =============================================================================
+
+def allocate_smart_minimum_guarantee(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
+                                   start_date: datetime.date, schedule: List[Dict],
+                                   rules_data: Dict, validator: ScheduleConflictValidator) -> int:
+    """
+    PHASE 0: Smart Minimum Guarantee with enhanced shared ice support.
+    """
+    allocated_count = 0
+    
+    print("\n" + "="*80)
+    print("PHASE 0: SMART MINIMUM GUARANTEE ALLOCATION")
+    print("="*80)
+    print("Strategy: Everyone gets 1+ session, enhanced shared ice, consecutive sessions allowed")
+    
+    # Sort teams by constraint complexity (most constrained first)
+    teams_by_complexity = []
+    for team_name, team_data in teams_needing_slots.items():
+        if team_data["needed"] > 0:
+            complexity = calculate_constraint_complexity(team_data["info"], team_name)
+            teams_by_complexity.append((complexity, team_name, team_data))
+    
+    teams_by_complexity.sort(reverse=True)
+    
+    print(f"Processing {len(teams_by_complexity)} teams needing ice (by constraint complexity)")
+    
+    for complexity, team_name, team_data in teams_by_complexity:
+        team_info = team_data["info"]
+        
+        if team_data["needed"] <= 0:
+            continue
+        
+        print(f"\n--- {team_name} (complexity: {complexity}, needs: {team_data['needed']}) ---")
+        
+        allocated = False
+        
+        # STRATEGY 1: Try optimal allocation
+        if has_mandatory_shared_ice(team_info):
+            print(f"  Trying mandatory shared ice...")
+            allocated = try_mandatory_shared_with_preferences(team_name, team_data, teams_needing_slots,
+                                                             available_blocks, start_date, schedule, 
+                                                             rules_data, validator)
+        elif has_strict_preferences(team_info):
+            print(f"  Trying strict preference allocation...")
+            allocated = try_strict_preference_allocation(team_name, team_data, available_blocks, 
+                                                       start_date, schedule, rules_data, validator)
+        else:
+            print(f"  Trying preferred time allocation...")
+            allocated = try_preferred_time_allocation(team_name, team_data, teams_needing_slots,
+                                                    available_blocks, start_date, schedule, 
+                                                    rules_data, validator)
+        
+        if allocated:
+            allocated_count += 1
+            print(f"  SUCCESS: Optimal allocation achieved")
+            continue
+        
+        # STRATEGY 2: Try relaxed allocation
+        print(f"  Optimal failed, trying relaxed allocation...")
+        if has_mandatory_shared_ice(team_info):
+            allocated = try_mandatory_shared_relaxed(team_name, team_data, teams_needing_slots,
+                                                   available_blocks, start_date, schedule, 
+                                                   rules_data, validator)
+        else:
+            allocated = try_any_preference_allocation(team_name, team_data, teams_needing_slots,
+                                                    available_blocks, start_date, schedule, 
+                                                    rules_data, validator)
+        
+        if allocated:
+            allocated_count += 1
+            print(f"  SUCCESS: Relaxed allocation achieved")
+            continue
+        
+        # STRATEGY 3: Force any available allocation
+        print(f"  Relaxed failed, forcing any available slot...")
+        allocated = force_any_available_allocation(team_name, team_data, teams_needing_slots,
+                                                 available_blocks, start_date, schedule, 
+                                                 rules_data, validator)
+        
+        if allocated:
+            allocated_count += 1
+            print(f"  SUCCESS: Minimum guarantee met")
+        else:
+            print(f"  FAILED: No available slots found")
+    
+    print(f"\nPHASE 0 COMPLETE: {allocated_count} minimum guarantee allocations")
+    print("="*80)
+    return allocated_count
+
+
+def allocate_preference_optimization(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
+                                   start_date: datetime.date, schedule: List[Dict],
+                                   rules_data: Dict, validator: ScheduleConflictValidator) -> int:
+    """
+    PHASE 1: Enhanced Preference Optimization with aggressive shared ice usage.
+    """
+    allocated_count = 0
+    
+    print("\n" + "="*80)
+    print("PHASE 1: PREFERENCE OPTIMIZATION ALLOCATION (ENHANCED)")
+    print("="*80)
+    print("Strategy: Preferences + aggressive shared ice usage for full allocation")
+    
+    max_iterations = 30
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
+        progress_made = False
+        
+        # Get teams still needing slots, sorted by priority
+        teams_needing = []
+        for team_name, team_data in teams_needing_slots.items():
+            if team_data["needed"] > 0:
+                priority = calculate_team_priority(team_data["info"], team_name)
+                # Boost priority for teams missing 2+ sessions
+                if team_data["needed"] >= 2:
+                    priority -= 50
+                teams_needing.append((priority, team_name, team_data))
+        
+        if not teams_needing:
+            print(f"All teams satisfied after {iteration-1} iterations")
+            break
+        
+        teams_needing.sort()
+        
+        print(f"\nIteration {iteration}: {len(teams_needing)} teams need more sessions")
+        
+        # Round robin: only one allocation per iteration
+        allocation_made_this_iteration = False
+        
+        # Strategy 1: Try shared ice for ANY team that allows it
+        for priority, team_name, team_data in teams_needing:
+            if team_data["needed"] <= 0 or allocation_made_this_iteration:
+                continue
+            
+            if try_shared_ice_for_any_team(team_name, team_data, teams_needing_slots,
+                                         available_blocks, start_date, schedule, 
+                                         rules_data, validator, "preference shared"):
+                allocated_count += 1
+                progress_made = True
+                allocation_made_this_iteration = True
+                print(f"  ENHANCED SHARED ICE: {team_name}")
+                break
+        
+        if allocation_made_this_iteration:
+            continue
+        
+        # Strategy 2: Try individual allocations with distribution awareness
+        for priority, team_name, team_data in teams_needing:
+            if team_data["needed"] <= 0 or allocation_made_this_iteration:
+                continue
+            
+            team_info = team_data["info"]
+            individual_blocks = [block for block in available_blocks 
+                               if is_block_available_for_team(block, team_info, team_data, rules_data, start_date)]
+            
+            if individual_blocks:
+                best_block = find_best_block_with_distribution(individual_blocks, team_info, team_data, rules_data, start_date)
+                if best_block and book_team_practice(team_name, team_data, best_block, start_date, schedule, validator, "relaxed"):
+                    allocated_count += 1
+                    progress_made = True
+                    allocation_made_this_iteration = True
+                    print(f"  ANY AVAILABLE: {team_name}")
+                    break
+        
+        if not progress_made:
+            print(f"  No progress in iteration {iteration}, stopping")
+            break
+    
+    print(f"\nPHASE 1 ENHANCED COMPLETE: {allocated_count} allocations")
+    print("="*80)
+    return allocated_count
+
+
+def allocate_capacity_maximization(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
+                                 start_date: datetime.date, schedule: List[Dict],
+                                 rules_data: Dict, validator: ScheduleConflictValidator) -> int:
+    """
+    PHASE 2: Capacity Maximization with consecutive session rules.
+    """
+    allocated_count = 0
+    
+    print("\n" + "="*80)
+    print("PHASE 2: CAPACITY MAXIMIZATION")
+    print("="*80)
+    print("Strategy: Fill remaining slots, allow consecutive sessions")
+    
+    max_iterations = 15
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
+        progress_made = False
+        
+        # Get all teams that could use more ice
+        teams_wanting_more = []
+        for team_name, team_data in teams_needing_slots.items():
+            if team_data["needed"] > 0:
+                priority = 0
+                teams_wanting_more.append((priority, team_name, team_data))
+            else:
+                # Teams that are satisfied but could take extra ice
+                team_type = team_data["info"].get("type")
+                team_age = team_data["info"].get("age")
+                max_per_week = (rules_data.get("ice_times_per_week", {})
+                               .get(team_type, {}).get(team_age, 0))
+                
+                total_weeks = max(1, len(team_data["weekly_count"]))
+                for week_num in range(1, total_weeks + 1):
+                    if team_data["weekly_count"][week_num] < max_per_week:
+                        priority = 100
+                        teams_wanting_more.append((priority, team_name, team_data))
+                        break
+        
+        if not teams_wanting_more:
+            print(f"No teams want more ice after {iteration-1} iterations")
+            break
+        
+        teams_wanting_more.sort()
+        
+        print(f"\nIteration {iteration}: {len(teams_wanting_more)} teams want more ice")
+        
+        allocation_made = False
+        
+        # Try to fill any remaining capacity
+        for priority, team_name, team_data in teams_wanting_more:
+            if allocation_made:
+                break
+                
+            team_info = team_data["info"]
+            
+            # Try shared ice first
+            if team_info.get("allow_shared_ice", True):
+                if try_shared_ice_for_any_team(team_name, team_data, teams_needing_slots,
+                                             available_blocks, start_date, schedule, 
+                                             rules_data, validator, "capacity shared"):
+                    allocated_count += 1
+                    progress_made = True
+                    allocation_made = True
+                    print(f"  CAPACITY SHARED: {team_name}")
+                    break
+            
+            # Try individual allocation
+            individual_blocks = [block for block in available_blocks 
+                               if is_block_available_for_team(block, team_info, team_data, rules_data, start_date)]
+            
+            if individual_blocks:
+                best_block = find_best_block_with_distribution(individual_blocks, team_info, team_data, rules_data, start_date)
+                if best_block and book_team_practice(team_name, team_data, best_block, start_date, schedule, validator, "capacity fill"):
+                    allocated_count += 1
+                    progress_made = True
+                    allocation_made = True
+                    print(f"  CAPACITY INDIVIDUAL: {team_name}")
+                    
+                    if best_block.remaining_minutes() < 30:
+                        available_blocks.remove(best_block)
+                    break
+        
+        if not progress_made:
+            print(f"  No progress in iteration {iteration}, stopping")
+            break
+    
+    print(f"\nPHASE 2 COMPLETE: {allocated_count} capacity maximization allocations")
+    print("="*80)
+    return allocated_count
+
+
+def allocate_maximum_utilization(teams_needing_slots: Dict, available_blocks: List[AvailableBlock],
+                               start_date: datetime.date, schedule: List[Dict],
+                               rules_data: Dict, validator: ScheduleConflictValidator) -> int:
+    """
+    PHASE 3: Maximum Utilization - Fill every remaining minute of ice.
+    Ignores quotas, preferences, and distribution - just fills ice.
+    """
+    allocated_count = 0
+    
+    print("\n" + "="*80)
+    print("PHASE 3: MAXIMUM UTILIZATION")
+    print("="*80)
+    print("Strategy: Fill every remaining minute - preferences ignored, maximum ice usage")
+    
+    iteration = 0
+    while any(block.remaining_minutes() >= 60 for block in available_blocks) and iteration < 50:
+        iteration += 1
+        progress_made = False
+        
+        # Sort blocks by remaining time (most remaining first)
+        blocks_with_time = [b for b in available_blocks if b.remaining_minutes() >= 60]
+        blocks_with_time.sort(key=lambda b: b.remaining_minutes(), reverse=True)
+        
+        print(f"\nUtilization Iteration {iteration}: {len(blocks_with_time)} blocks with 60+ minutes remaining")
+        
+        for block in blocks_with_time:
+            remaining = block.remaining_minutes()
+            
+            # Find ANY team that can physically use this block (ignore quotas)
+            for team_name, team_data in teams_needing_slots.items():
+                team_info = team_data["info"]
+                
+                # Only check essential constraints (blackouts, same-day limits)
+                if (not has_blackout_on_date(team_info, block.date) and
+                    not block_would_exceed_daily_limit(team_name, team_data, block, schedule)):
+                    
+                    # Use ALL remaining time in block (with minimum 60 minutes)
+                    duration_to_use = max(60, remaining)
+                    
+                    if book_extended_practice(team_name, team_data, block, duration_to_use, 
+                                            start_date, schedule, validator):
+                        allocated_count += 1
+                        progress_made = True
+                        new_remaining = block.remaining_minutes()
+                        print(f"  UTILIZATION: {team_name} gets {duration_to_use}min (block now has {new_remaining}min remaining)")
+                        break
+            
+            if progress_made:
+                break
+        
+        if not progress_made:
+            print(f"  No more teams can use remaining ice")
+            break
+    
+    # Report remaining unused ice
+    total_unused = sum(block.remaining_minutes() for block in available_blocks)
+    print(f"\nFinal unused ice time: {total_unused} minutes across {len(available_blocks)} blocks")
+    
+    print(f"\nPHASE 3 COMPLETE: {allocated_count} utilization allocations")
+    print("="*80)
+    return allocated_count
+
+
+# =============================================================================
+# SECTION 11: VALIDATION FUNCTIONS
+# =============================================================================
+
+def validate_consecutive_sessions(schedule: List[Dict]) -> List[str]:
+    """Validate that all teams with 2+ sessions on same day have consecutive sessions."""
+    violations = []
+    
+    # Group sessions by team and date
+    team_date_sessions = defaultdict(list)
+    for event in schedule:
+        team = event.get("team")
+        date = event.get("date")
+        time_slot = event.get("time_slot")
+        
+        if team and date and time_slot:
+            team_date_sessions[(team, date)].append(time_slot)
+            
+        # Also check shared practice opponent
+        if event.get("type") == "shared practice":
+            opponent = event.get("opponent")
+            if opponent and opponent not in ("Practice", "TBD"):
+                team_date_sessions[(opponent, date)].append(time_slot)
+    
+    # Check each team-date combination with 2+ sessions
+    for (team, date), time_slots in team_date_sessions.items():
+        if len(time_slots) > 3:
+            violations.append(f"{team} has {len(time_slots)} sessions on {date}: {time_slots}")
+        elif len(time_slots) == 2:
+            # Check if consecutive
+            try:
+                times = []
+                for slot in time_slots:
+                    start_str, end_str = slot.split("-")
+                    start_time = datetime.datetime.strptime(start_str, "%H:%M").time()
+                    end_time = datetime.datetime.strptime(end_str, "%H:%M").time()
+                    times.append((start_time, end_time))
+                
+                times.sort()
+                
+                # Check if first session's end time equals second session's start time
+                if times[0][1] != times[1][0]:
+                    violations.append(f"{team} has non-consecutive sessions on {date}: {time_slots}")
+                    
+            except Exception as e:
+                violations.append(f"{team} has unparseable time slots on {date}: {time_slots} ({e})")
+    
+    return violations
+
+
+def clean_schedule_duplicates(schedule: List[Dict]) -> List[Dict]:
+    """Remove exact duplicate entries from the schedule."""
+    seen = set()
+    cleaned = []
+    
+    for entry in schedule:
+        key = (
+            entry.get("team", ""),
+            entry.get("opponent", ""),
+            entry.get("arena", ""),
+            entry.get("date", ""),
+            entry.get("time_slot", ""),
+            entry.get("type", "")
+        )
+        
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(entry)
+    
+    return cleaned
+
+
+# =============================================================================
+# SECTION 12: MAIN SCHEDULER FUNCTION
 # =============================================================================
 
 def generate_schedule_enhanced_FIXED(
@@ -1474,21 +1528,24 @@ def generate_schedule_enhanced_FIXED(
     rules_data: Dict,
 ):
     """
-    SMART MINIMUM GUARANTEE SCHEDULER WITH FIXED SAME-DAY PREVENTION:
+    MAXIMUM UTILIZATION HOCKEY SCHEDULER:
     
-    Phase 0: Smart Minimum Guarantee - Everyone gets 1+ session, STRICT same-day prevention
-    Phase 1: Preference Optimization - Add more sessions, STRICT same-day prevention, round-robin fairness  
-    Phase 2: Capacity Maximization - Fill remaining slots, allow 2nd session per day ONLY if back-to-back
+    Phase 0: Smart Minimum Guarantee - Everyone gets 1+ session, enhanced shared ice support
+    Phase 1: Preference Optimization - Aggressive shared ice usage for full allocation  
+    Phase 2: Capacity Maximization - Fill remaining slots with consecutive session rules
+    Phase 3: Maximum Utilization - Fill every remaining minute of ice time
     
-    Key fixes:
-    1. No more than 1 session per day in Phases 0 & 1
-    2. 2nd session per day in Phase 2 ONLY if back-to-back AND team allows multiple
-    3. Round-robin allocation in Phase 1 to prevent same team getting multiple sessions per iteration
-    4. Massive penalties for same-day sessions to encourage distribution
+    Key features:
+    1. Maximum 2 sessions per day per team (3 in utilization phase)
+    2. If 2+ sessions on same day, they MUST be consecutive
+    3. Enhanced shared ice for ALL teams that allow it (not just mandatory)
+    4. Prioritize teams missing 2+ sessions for shared ice partnerships
+    5. Extended sessions to use all remaining ice time
+    6. No ice time is wasted
     """
     
-    print("=== SMART MINIMUM GUARANTEE SCHEDULER (FIXED SAME-DAY PREVENTION) ===")
-    print("Strategy: Everyone gets ice, preferences respected, STRICT day distribution")
+    print("=== MAXIMUM UTILIZATION HOCKEY SCHEDULER ===")
+    print("Strategy: Full allocation + enhanced shared ice + maximum utilization")
     
     # Initialize
     validator = ScheduleConflictValidator()
@@ -1516,7 +1573,7 @@ def generate_schedule_enhanced_FIXED(
                             weekday = current_date.weekday()
 
                             team_name = slot.get("team") or slot.get("pre_assigned_team")
-                            if team_name:  # Pre-assigned
+                            if team_name:
                                 team_info = teams_data.get(team_name, {})
                                 slot_type = slot.get("type")
 
@@ -1629,18 +1686,20 @@ def generate_schedule_enhanced_FIXED(
             complexity = calculate_constraint_complexity(team_data["info"], team_name)
             mandatory_shared = has_mandatory_shared_ice(team_data["info"])
             strict_prefs = has_strict_preferences(team_data["info"])
-            teams_with_constraints.append((complexity, team_name, mandatory_shared, strict_prefs))
+            allow_shared = team_data["info"].get("allow_shared_ice", True)
+            teams_with_constraints.append((complexity, team_name, mandatory_shared, strict_prefs, allow_shared))
     
     teams_with_constraints.sort(reverse=True)
     print(f"Teams by constraint complexity:")
-    for complexity, team_name, mandatory, strict in teams_with_constraints[:5]:  # Show top 5
+    for complexity, team_name, mandatory, strict, allow_shared in teams_with_constraints[:5]:
         flags = []
         if mandatory: flags.append("mandatory_shared")
         if strict: flags.append("strict_prefs")
-        print(f"  {team_name}: {complexity} ({', '.join(flags) if flags else 'flexible'})")
+        if allow_shared: flags.append("allows_shared")
+        print(f"  {team_name}: {complexity} ({', '.join(flags) if flags else 'no_sharing'})")
 
-    # 3-PHASE SMART ALLOCATION STRATEGY WITH FIXED SAME-DAY PREVENTION
-    print("\n=== 3-PHASE SMART ALLOCATION STRATEGY (FIXED) ===")
+    # 4-PHASE MAXIMUM UTILIZATION STRATEGY
+    print("\n=== 4-PHASE MAXIMUM UTILIZATION STRATEGY ===")
     
     # PHASE 0: SMART MINIMUM GUARANTEE
     phase0_allocated = allocate_smart_minimum_guarantee(
@@ -1656,6 +1715,11 @@ def generate_schedule_enhanced_FIXED(
     phase2_allocated = allocate_capacity_maximization(
         teams_needing_slots, available_blocks, start_date, schedule, rules_data, validator
     )
+    
+    # PHASE 3: MAXIMUM UTILIZATION (NEW)
+    phase3_allocated = allocate_maximum_utilization(
+        teams_needing_slots, available_blocks, start_date, schedule, rules_data, validator
+    )
 
     # Generate final analysis
     print("\n=== FINAL ANALYSIS ===")
@@ -1664,7 +1728,7 @@ def generate_schedule_enhanced_FIXED(
     underallocated = []
     zero_allocations = []
     perfect_allocations = []
-    same_day_violations = []
+    consecutive_violations = []
     
     for team_name, team_data in teams_needing_slots.items():
         target = team_data["total_target"]
@@ -1673,18 +1737,6 @@ def generate_schedule_enhanced_FIXED(
         total_target += target
         
         percentage = (allocated / target * 100) if target > 0 else 100
-        
-        # Check for same-day violations
-        date_counts = {}
-        for event in schedule:
-            if event.get("team") == team_name or (event.get("type") == "shared practice" and event.get("opponent") == team_name):
-                date = event.get("date")
-                if date:
-                    date_counts[date] = date_counts.get(date, 0) + 1
-        
-        max_sessions_per_day = max(date_counts.values()) if date_counts else 0
-        if max_sessions_per_day > 2:
-            same_day_violations.append((team_name, max_sessions_per_day, date_counts))
         
         if allocated == 0:
             zero_allocations.append(team_name)
@@ -1702,18 +1754,28 @@ def generate_schedule_enhanced_FIXED(
     print(f"  Phase 0 (Smart Minimum): {phase0_allocated} sessions")
     print(f"  Phase 1 (Preference Optimization): {phase1_allocated} sessions")
     print(f"  Phase 2 (Capacity Maximization): {phase2_allocated} sessions")
-    print(f"  Total: {phase0_allocated + phase1_allocated + phase2_allocated} sessions")
+    print(f"  Phase 3 (Maximum Utilization): {phase3_allocated} sessions")
+    print(f"  Total: {phase0_allocated + phase1_allocated + phase2_allocated + phase3_allocated} sessions")
     
-    # Check for same-day violations
-    if same_day_violations:
-        print(f"\n⚠️  SAME-DAY VIOLATIONS DETECTED ({len(same_day_violations)}):")
-        for team_name, max_count, date_counts in same_day_violations:
-            print(f"  {team_name}: {max_count} sessions in one day")
-            for date, count in date_counts.items():
-                if count > 2:
-                    print(f"    {date}: {count} sessions")
+    # Validate consecutive sessions
+    consecutive_violations = validate_consecutive_sessions(schedule)
+    if consecutive_violations:
+        print(f"\n⚠️  CONSECUTIVE SESSION VIOLATIONS ({len(consecutive_violations)}):")
+        for violation in consecutive_violations:
+            print(f"  {violation}")
     else:
-        print(f"\n✅ NO SAME-DAY VIOLATIONS: All teams have max 2 sessions per day")
+        print(f"\n✅ CONSECUTIVE SESSION VALIDATION: All multi-session days are consecutive")
+    
+    # Ice utilization analysis
+    total_available_minutes = sum(block.duration_minutes() for block in available_blocks)
+    total_unused_minutes = sum(block.remaining_minutes() for block in available_blocks)
+    utilization_percentage = ((total_available_minutes - total_unused_minutes) / total_available_minutes * 100) if total_available_minutes > 0 else 0
+    
+    print(f"\nICE UTILIZATION ANALYSIS:")
+    print(f"  Total available ice: {total_available_minutes} minutes ({total_available_minutes//60:.1f} hours)")
+    print(f"  Ice time used: {total_available_minutes - total_unused_minutes} minutes ({(total_available_minutes - total_unused_minutes)//60:.1f} hours)")
+    print(f"  Ice time unused: {total_unused_minutes} minutes ({total_unused_minutes//60:.1f} hours)")
+    print(f"  Utilization rate: {utilization_percentage:.1f}%")
     
     # Allocation categories
     if perfect_allocations:
@@ -1726,33 +1788,63 @@ def generate_schedule_enhanced_FIXED(
         for team in zero_allocations:
             team_info = teams_needing_slots[team]["info"]
             blackouts = len(team_info.get("blackout_dates", []))
-            print(f"  {team} (blackouts: {blackouts})")
+            allows_shared = team_info.get("allow_shared_ice", True)
+            print(f"  {team} (blackouts: {blackouts}, allows_shared: {allows_shared})")
     
     if underallocated:
         print(f"\nUNDERALLOCATED TEAMS ({len(underallocated)}):")
         for team, allocated, target, remaining in sorted(underallocated, key=lambda x: x[3], reverse=True):
-            print(f"  {team}: {allocated}/{target} (missing {remaining})")
+            team_info = teams_needing_slots[team]["info"]
+            allows_shared = team_info.get("allow_shared_ice", True)
+            blackouts = len(team_info.get("blackout_dates", []))
+            print(f"  {team}: {allocated}/{target} (missing {remaining}) - shared_ice: {allows_shared}, blackouts: {blackouts}")
 
     # Analyze shared ice success
     shared_sessions = [event for event in schedule if event.get("type") == "shared practice"]
-    mandatory_shared_teams = [name for name, data in teams_needing_slots.items() 
-                             if has_mandatory_shared_ice(data["info"])]
+    teams_with_shared_ice = set()
+    teams_allowing_shared = [name for name, data in teams_needing_slots.items() 
+                           if data["info"].get("allow_shared_ice", True)]
+    
+    for event in shared_sessions:
+        teams_with_shared_ice.add(event.get("team"))
+        opponent = event.get("opponent")
+        if opponent and opponent not in ("Practice", "TBD"):
+            teams_with_shared_ice.add(opponent)
     
     print(f"\nSHARED ICE ANALYSIS:")
     print(f"  Total shared sessions: {len(shared_sessions)}")
-    print(f"  Teams with mandatory sharing: {len(mandatory_shared_teams)}")
+    print(f"  Teams allowing shared ice: {len(teams_allowing_shared)}")
+    print(f"  Teams that got shared ice: {len(teams_with_shared_ice)}")
+    print(f"  Shared ice utilization: {len(teams_with_shared_ice)}/{len(teams_allowing_shared)} ({len(teams_with_shared_ice)/max(1,len(teams_allowing_shared))*100:.1f}%)")
     
-    # Show sharing success for mandatory teams
-    for team_name in mandatory_shared_teams:
-        team_shared_count = sum(1 for event in schedule 
-                               if ((event.get("team") == team_name and event.get("opponent") not in ("Practice", "TBD")) or
-                                   (event.get("opponent") == team_name and event.get("team") != team_name)))
-        team_total = len([event for event in schedule if event.get("team") == team_name or event.get("opponent") == team_name])
-        sharing_percentage = (team_shared_count / team_total * 100) if team_total > 0 else 0
-        print(f"    {team_name}: {team_shared_count}/{team_total} shared ({sharing_percentage:.1f}%)")
+    # Show specific shared ice examples
+    if shared_sessions:
+        print(f"  Sample shared sessions:")
+        for i, session in enumerate(shared_sessions[:3]):
+            team1 = session.get("team")
+            team2 = session.get("opponent")
+            date = session.get("date")
+            time = session.get("time_slot")
+            print(f"    {team1} + {team2} on {date} at {time}")
+        if len(shared_sessions) > 3:
+            print(f"    ... and {len(shared_sessions) - 3} more")
 
-    print(f"\nRemaining ice capacity: {len(available_blocks)} blocks with {sum(b.remaining_minutes() for b in available_blocks)} minutes")
-    print("✅ FIXED Smart minimum guarantee scheduler complete - same-day violations prevented")
+    # Final success assessment
+    if utilization_percentage >= 95:
+        print("\n✅ EXCELLENT: Maximum utilization achieved - minimal ice waste")
+    elif utilization_percentage >= 85:
+        print("\n✅ SUCCESS: High utilization achieved - most ice time used")
+    elif utilization_percentage >= 75:
+        print("\n⚠️  GOOD: Reasonable utilization - some ice time unused")
+    else:
+        print("\n❌ POOR: Low utilization - significant ice time wasted")
+    
+    if len(underallocated) <= 2 and all(remaining <= 1 for _, _, _, remaining in underallocated):
+        print("✅ ALLOCATION SUCCESS: All teams received required ice with minimal shortfalls")
+    elif len(underallocated) <= 5:
+        print("⚠️  PARTIAL SUCCESS: Most teams allocated, some minor shortfalls remain")
+    else:
+        print("❌ ALLOCATION ISSUES: Multiple teams significantly under-allocated")
     
     # Clean and validate final schedule
     schedule = clean_schedule_duplicates(schedule)
@@ -1762,40 +1854,24 @@ def generate_schedule_enhanced_FIXED(
         "phase0_allocated": phase0_allocated, 
         "phase1_allocated": phase1_allocated,
         "phase2_allocated": phase2_allocated,
+        "phase3_allocated": phase3_allocated,
         "zero_allocations": zero_allocations,
         "perfect_allocations": perfect_allocations,
-        "same_day_violations": same_day_violations
+        "underallocated": underallocated,
+        "consecutive_violations": consecutive_violations,
+        "shared_sessions_count": len(shared_sessions),
+        "teams_with_shared_ice": len(teams_with_shared_ice),
+        "ice_utilization_percentage": utilization_percentage,
+        "total_unused_minutes": total_unused_minutes
     }
 
 
-def clean_schedule_duplicates(schedule: List[Dict]) -> List[Dict]:
-    """Remove exact duplicate entries from the schedule."""
-    seen = set()
-    cleaned = []
-    
-    for entry in schedule:
-        key = (
-            entry.get("team", ""),
-            entry.get("opponent", ""),
-            entry.get("arena", ""),
-            entry.get("date", ""),
-            entry.get("time_slot", ""),
-            entry.get("type", "")
-        )
-        
-        if key not in seen:
-            seen.add(key)
-            cleaned.append(entry)
-    
-    return cleaned
-
-
 # =============================================================================
-# SECTION 12: BACKWARD COMPATIBILITY
+# SECTION 13: BACKWARD COMPATIBILITY & MAIN INTERFACE
 # =============================================================================
 
 def generate_schedule(*args, **kwargs):
-    """Backward compatibility wrapper for the fixed smart minimum guarantee scheduler."""
+    """Main interface for the maximum utilization hockey scheduler."""
     return generate_schedule_enhanced_FIXED(*args, **kwargs)
 
 
@@ -1804,71 +1880,13 @@ def generate_schedule_enhanced(*args, **kwargs):
     return generate_schedule_enhanced_FIXED(*args, **kwargs)
 
 
-def generate_schedule_fixed_constraints(*args, **kwargs):
-    """Alternative function name."""
-    return generate_schedule_enhanced_FIXED(*args, **kwargs)
-
-
-# =============================================================================
-# SECTION 13: TESTING AND VALIDATION
-# =============================================================================
-
-def test_same_day_prevention_logic():
-    """Test function to validate same-day prevention is working correctly."""
-    print("=== SAME-DAY PREVENTION TEST ===")
-    
-    # Create test team data
-    test_team_data = {
-        "info": {"allow_multiple_per_day": False, "practice_duration": 60},
-        "scheduled_dates": {datetime.date(2025, 10, 26)}  # Already has one session on 2025-10-26
-    }
-    
-    test_block = AvailableBlock(
-        arena="Test Arena",
-        date=datetime.date(2025, 10, 26),  # Same date
-        start_time=datetime.time(17, 0),
-        end_time=datetime.time(18, 0),
-        weekday=5
-    )
-    
-    test_schedule = [
-        {
-            "team": "Test Team",
-            "date": "2025-10-26",
-            "time_slot": "15:00-16:00"
-        }
-    ]
-    
-    # Test Phase 0/1 (should block)
-    result = should_allow_same_day_booking("Test Team", test_team_data, test_block, test_schedule, "strict preference", False)
-    print(f"Phase 0/1 same-day booking (should be False): {result}")
-    
-    # Test capacity phase with back-to-back (should allow if back-to-back)
-    test_block_backtoback = AvailableBlock(
-        arena="Test Arena",
-        date=datetime.date(2025, 10, 26),
-        start_time=datetime.time(16, 0),  # Right after existing 15:00-16:00 session
-        end_time=datetime.time(17, 0),
-        weekday=5
-    )
-    
-    result_capacity = should_allow_same_day_booking("Test Team", test_team_data, test_block_backtoback, test_schedule, "capacity fill", False)
-    print(f"Capacity phase back-to-back booking (should be False for non-multiple teams): {result_capacity}")
-    
-    # Test with allow_multiple_per_day = True
-    test_team_data["info"]["allow_multiple_per_day"] = True
-    result_multiple = should_allow_same_day_booking("Test Team", test_team_data, test_block_backtoback, test_schedule, "capacity fill", True)
-    print(f"Capacity phase back-to-back with allow_multiple (should be True): {result_multiple}")
-
-
 if __name__ == "__main__":
-    print("Fixed Smart Minimum Guarantee Hockey Scheduler")
-    print("Key fixes:")
-    print("✅ No more than 1 session per day in Phases 0 & 1")
-    print("✅ 2nd session per day in Phase 2 ONLY if back-to-back AND team allows multiple") 
-    print("✅ Round-robin allocation prevents same team monopolizing iterations")
-    print("✅ Massive penalties (2000+) for same-day sessions encourage distribution")
-    print("✅ Same-day violation detection in final analysis")
+    print("Maximum Utilization Hockey Scheduler")
+    print("Key features:")
+    print("✅ Maximum 2 sessions per day, must be consecutive (3 max in utilization phase)")
+    print("✅ Enhanced shared ice for ALL teams that allow it")  
+    print("✅ Priority matching based on need and preferences")
+    print("✅ Extended sessions to use all remaining ice time")
+    print("✅ 4-phase allocation for maximum utilization")
+    print("✅ Comprehensive ice usage analysis")
     
-    # Run test
-    test_same_day_prevention_logic()
